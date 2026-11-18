@@ -34,30 +34,71 @@ export default function ReportWorkspacePage({
   const [error, setError] = useState<string | null>(null);
   const [isApproveAllLoading, setIsApproveAllLoading] = useState(false);
 
+  // Helper to persist to localStorage for serverless resilience
+  const persistReport = useCallback((r: ReportRecord) => {
+    try {
+      localStorage.setItem(`founderflow_report_${r.id}`, JSON.stringify(r));
+      const indexList = JSON.parse(localStorage.getItem("founderflow_reports_index") || "[]");
+      if (!indexList.includes(r.id)) {
+        localStorage.setItem("founderflow_reports_index", JSON.stringify([r.id, ...indexList]));
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
   // Fetch report data
   const fetchReport = useCallback(async () => {
+    // 1. First check localStorage for immediate render and resilience
+    let cachedReport: ReportRecord | null = null;
+    try {
+      const cached = localStorage.getItem(`founderflow_report_${reportId}`);
+      if (cached) {
+        cachedReport = JSON.parse(cached);
+        setReport(cachedReport);
+      }
+    } catch {
+      // ignore
+    }
+
     try {
       const res = await fetch(`/api/reports/${reportId}`);
-      if (!res.ok) {
-        throw new Error("Failed to load research report.");
-      }
-      const data = await res.json();
-      if (data.success && data.report) {
-        setReport(data.report);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.report) {
+          setReport(data.report);
+          persistReport(data.report);
 
-        // Find active stage if not yet selected
-        const stages: StageRecord[] = data.report.stages || [];
+          const stages: StageRecord[] = data.report.stages || [];
+          const firstUnapproved = stages.find((s) => s.status !== "approved");
+          if (firstUnapproved) {
+            setActiveStage(firstUnapproved.name);
+          }
+          setLoading(false);
+          return;
+        }
+      }
+
+      // If server returned 404 (stateless serverless without DB), but we have local cache:
+      if (cachedReport) {
+        setLoading(false);
+        const stages: StageRecord[] = cachedReport.stages || [];
         const firstUnapproved = stages.find((s) => s.status !== "approved");
         if (firstUnapproved) {
           setActiveStage(firstUnapproved.name);
         }
+        return;
       }
+
+      throw new Error("Report not found");
     } catch (err: any) {
-      setError(err.message || "An error occurred.");
+      if (!cachedReport) {
+        setError(err.message || "Failed to load research report.");
+      }
     } finally {
       setLoading(false);
     }
-  }, [reportId]);
+  }, [reportId, persistReport]);
 
   useEffect(() => {
     fetchReport();
@@ -68,19 +109,20 @@ export default function ReportWorkspacePage({
     if (!report) return;
 
     // Set local state to generating immediately for instant UI feedback
-    setReport((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        stages: (prev.stages || []).map((s) =>
-          s.name === stageName ? { ...s, status: "generating", error: null } : s
-        ),
-      };
-    });
+    const updatedWithGenerating: ReportRecord = {
+      ...report,
+      stages: (report.stages || []).map((s) =>
+        s.name === stageName ? { ...s, status: "generating", error: null } : s
+      ),
+    };
+    setReport(updatedWithGenerating);
+    persistReport(updatedWithGenerating);
 
     try {
       const res = await fetch(`/api/reports/${report.id}/stages/${stageName}/run`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ report: updatedWithGenerating }),
       });
       const data = await res.json();
 
@@ -91,28 +133,32 @@ export default function ReportWorkspacePage({
       // Update report with the newly generated stage
       setReport((prev) => {
         if (!prev) return prev;
-        return {
+        const updated: ReportRecord = {
           ...prev,
           status: "in_review",
           stages: (prev.stages || []).map((s) =>
             s.name === stageName ? data.stage : s
           ),
         };
+        persistReport(updated);
+        return updated;
       });
     } catch (err: any) {
       setReport((prev) => {
         if (!prev) return prev;
-        return {
+        const withErr: ReportRecord = {
           ...prev,
           stages: (prev.stages || []).map((s) =>
             s.name === stageName ? { ...s, status: "error", error: err.message } : s
           ),
         };
+        persistReport(withErr);
+        return withErr;
       });
     }
   };
 
-  // Auto-run Stage 1 if newly created
+  // Auto-run Stage 1 if newly created and pending
   useEffect(() => {
     if (report && report.stages) {
       const stage1 = report.stages.find((s) => s.name === "idea_analysis");
@@ -139,12 +185,14 @@ export default function ReportWorkspacePage({
 
       setReport((prev) => {
         if (!prev) return prev;
-        return {
+        const updated: ReportRecord = {
           ...prev,
           stages: (prev.stages || []).map((s) =>
             s.name === stageName ? data.stage : s
           ),
         };
+        persistReport(updated);
+        return updated;
       });
     } catch (err: any) {
       alert(`Error saving edit: ${err.message}`);
@@ -168,6 +216,8 @@ export default function ReportWorkspacePage({
 
       // Update state
       let nextStageName: StageName | null = null;
+      let nextReportState: ReportRecord | null = null;
+
       setReport((prev) => {
         if (!prev) return prev;
         const currentIdx = STAGE_NAMES.indexOf(stageName);
@@ -175,23 +225,61 @@ export default function ReportWorkspacePage({
           nextStageName = STAGE_NAMES[currentIdx + 1];
         }
 
-        return {
+        const allApproved = prev.stages?.every((s) =>
+          s.name === stageName ? true : s.status === "approved"
+        );
+
+        const updated: ReportRecord = {
           ...prev,
-          status: data.reportStatus || prev.status,
+          status: allApproved ? "approved" : (data.reportStatus || prev.status),
           stages: (prev.stages || []).map((s) =>
             s.name === stageName ? { ...s, status: "approved" } : s
           ),
         };
+        nextReportState = updated;
+        persistReport(updated);
+        return updated;
       });
 
-      // Advance active stage
+      // Advance active stage & trigger next
       if (nextStageName) {
         setActiveStage(nextStageName);
 
-        // Auto-run next stage if it was pending
         const nextStageObj = report.stages?.find((s) => s.name === nextStageName);
-        if (nextStageObj && nextStageObj.status === "pending") {
-          await handleRunStage(nextStageName);
+        if (nextStageObj && nextStageObj.status === "pending" && nextReportState) {
+          const targetReport: ReportRecord = nextReportState;
+          const updatedForNext: ReportRecord = {
+            ...targetReport,
+            stages: (targetReport.stages || []).map((s) =>
+              s.name === nextStageName ? { ...s, status: "generating", error: null } : s
+            ),
+          };
+          setReport(updatedForNext);
+          persistReport(updatedForNext);
+
+          try {
+            const nextRes = await fetch(`/api/reports/${report.id}/stages/${nextStageName}/run`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ report: updatedForNext }),
+            });
+            const nextData = await nextRes.json();
+            if (nextRes.ok && nextData.success) {
+              setReport((prev) => {
+                if (!prev) return prev;
+                const finalNext: ReportRecord = {
+                  ...prev,
+                  stages: (prev.stages || []).map((s) =>
+                    s.name === nextStageName ? nextData.stage : s
+                  ),
+                };
+                persistReport(finalNext);
+                return finalNext;
+              });
+            }
+          } catch (err) {
+            console.error("Next stage run error:", err);
+          }
         }
       }
     } catch (err: any) {
@@ -210,23 +298,40 @@ export default function ReportWorkspacePage({
     setIsApproveAllLoading(true);
 
     try {
-      // Run and approve each stage in sequence
+      let currentReport = { ...report };
+
       for (const stageName of STAGE_NAMES) {
-        let currentStage = report.stages?.find((s) => s.name === stageName);
+        let currentStage = currentReport.stages?.find((s) => s.name === stageName);
 
         if (!currentStage || currentStage.status === "pending" || currentStage.status === "error") {
-          await handleRunStage(stageName);
+          const runRes = await fetch(`/api/reports/${report.id}/stages/${stageName}/run`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ report: currentReport }),
+          });
+          const runData = await runRes.json();
+          if (runRes.ok && runData.success) {
+            currentStage = runData.stage;
+          }
         }
 
-        await fetch(`/api/reports/${report.id}/stages/${stageName}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: "approved" }),
-        });
+        const approvedStage: StageRecord = {
+          ...(currentStage as StageRecord),
+          status: "approved",
+        };
+
+        currentReport = {
+          ...currentReport,
+          stages: (currentReport.stages || []).map((s) =>
+            s.name === stageName ? approvedStage : s
+          ),
+        };
+        persistReport(currentReport);
       }
 
-      // Refresh final report state
-      await fetchReport();
+      currentReport.status = "approved";
+      setReport(currentReport);
+      persistReport(currentReport);
     } catch (err: any) {
       console.error("Approve all error:", err);
       alert(`Failed to complete all stages: ${err.message}`);
@@ -380,4 +485,3 @@ export default function ReportWorkspacePage({
     </div>
   );
 }
-

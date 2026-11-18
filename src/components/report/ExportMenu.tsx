@@ -18,7 +18,14 @@ export function ExportMenu({ report, onApproveAll, isApproveAllLoading }: Export
   const handleExportMarkdown = async () => {
     setDownloading(true);
     try {
-      const res = await fetch(`/api/reports/${report.id}/export?format=md${isApproved ? "" : "&force=true"}`);
+      let res = await fetch(`/api/reports/${report.id}/export?format=md${isApproved ? "" : "&force=true"}`);
+      if (!res.ok) {
+        res = await fetch(`/api/reports/${report.id}/export?format=md${isApproved ? "" : "&force=true"}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ report }),
+        });
+      }
       if (!res.ok) {
         const errorData = await res.json();
         alert(errorData.error || "Failed to export report.");

@@ -14,6 +14,7 @@ import {
   STAGE_NAMES,
   type StageName,
   type SourceLink,
+  type ReportRecord,
   IdeaAnalysisSchema,
   TargetAudienceSchema,
   CompetitorResearchSchema,
@@ -23,8 +24,35 @@ import {
   FinalReportSchema,
 } from "@/types";
 
-export async function runPipelineStage(reportId: string, stageName: StageName) {
-  const report = await reportRepository.getReport(reportId);
+export async function runPipelineStage(
+  reportId: string,
+  stageName: StageName,
+  fallbackReport?: ReportRecord
+) {
+  let report = await reportRepository.getReport(reportId);
+
+  // If report not found in DB/memory (stateless serverless environment), use fallback from client
+  if (!report && fallbackReport) {
+    report = fallbackReport;
+    try {
+      await reportRepository.createReport({
+        id: fallbackReport.id,
+        userId: fallbackReport.userId || "anon",
+        idea: fallbackReport.idea,
+        industry: fallbackReport.industry || undefined,
+        region: fallbackReport.region || undefined,
+        budget: fallbackReport.budget || undefined,
+        initialStages: (fallbackReport.stages || []).map((s) => ({
+          id: s.id,
+          name: s.name,
+          orderIndex: s.orderIndex,
+        })),
+      });
+    } catch {
+      // Ignore fallback re-registration errors
+    }
+  }
+
   if (!report) {
     throw new Error(`Report not found with ID ${reportId}`);
   }
@@ -215,7 +243,18 @@ Analyze market size signals (TAM, SAM, SOM signals and growth drivers), key emer
     }
 
     const updated = await reportRepository.getReport(reportId);
-    return updated?.stages?.find((s) => s.name === stageName);
+    const finalStage = updated?.stages?.find((s) => s.name === stageName) || {
+      id: `stage-${stageName}`,
+      reportId,
+      name: stageName,
+      orderIndex: STAGE_NAMES.indexOf(stageName),
+      status: "generated" as const,
+      output: stageOutput,
+      sources: stageSources.length > 0 ? stageSources : (stageOutput?.sources || []),
+      updatedAt: new Date().toISOString(),
+    };
+
+    return finalStage;
   } catch (err: any) {
     console.error(`[Pipeline] Failed running stage ${stageName}:`, err);
     await reportRepository.updateStage({
@@ -227,4 +266,3 @@ Analyze market size signals (TAM, SAM, SOM signals and growth drivers), key emer
     throw err;
   }
 }
-

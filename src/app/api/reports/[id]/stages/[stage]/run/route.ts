@@ -27,7 +27,7 @@ export async function POST(
     // Rate Limiting
     const forwarded = req.headers.get("x-forwarded-for");
     const ip = forwarded ? forwarded.split(",")[0].trim() : "127.0.0.1";
-    const rateLimitCheck = checkRateLimit(`rate_limit_stage_run_${ip}`, 25, 60000);
+    const rateLimitCheck = checkRateLimit(`rate_limit_stage_run_${ip}`, 30, 60000);
 
     if (!rateLimitCheck.success) {
       return NextResponse.json(
@@ -45,8 +45,19 @@ export async function POST(
       );
     }
 
+    // Parse fallback report if provided by client (vital for serverless statelessness without DB)
+    let fallbackReport: any = undefined;
+    try {
+      const body = await req.json();
+      if (body && body.report) {
+        fallbackReport = body.report;
+      }
+    } catch {
+      // Optional body
+    }
+
     // Execute the stage pipeline
-    const updatedStage = await runPipelineStage(reportId, stage as StageName);
+    const updatedStage = await runPipelineStage(reportId, stage as StageName, fallbackReport);
 
     return NextResponse.json({
       success: true,
@@ -65,4 +76,3 @@ export async function POST(
     );
   }
 }
-

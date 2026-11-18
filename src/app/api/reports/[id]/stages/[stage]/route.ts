@@ -8,6 +8,7 @@ const PatchStageSchema = z.object({
   output: z.any().optional(),
   sources: z.array(z.any()).optional(),
   error: z.string().nullable().optional(),
+  report: z.any().optional(),
 });
 
 export async function PATCH(
@@ -36,6 +37,28 @@ export async function PATCH(
 
     const stageName = stage as StageName;
 
+    // Check if report exists; if not and client passed fallback report, rehydrate
+    let existingReport = await reportRepository.getReport(reportId);
+    if (!existingReport && body?.report) {
+      try {
+        await reportRepository.createReport({
+          id: body.report.id,
+          userId: body.report.userId || "anon",
+          idea: body.report.idea,
+          industry: body.report.industry,
+          region: body.report.region,
+          budget: body.report.budget,
+          initialStages: (body.report.stages || []).map((s: any) => ({
+            id: s.id,
+            name: s.name,
+            orderIndex: s.orderIndex,
+          })),
+        });
+      } catch {
+        // ignore
+      }
+    }
+
     await reportRepository.updateStage({
       reportId,
       stageName,
@@ -46,19 +69,25 @@ export async function PATCH(
     });
 
     // Check if all stages are now approved
-    const report = await reportRepository.getReport(reportId);
+    const report = await reportRepository.getReport(reportId) || body?.report;
+    let reportStatus = report?.status || "in_review";
+
     if (report && report.stages) {
-      const allApproved = report.stages.every((s) => s.status === "approved");
-      const currentStageObj = report.stages.find((s) => s.name === stageName);
+      const allApproved = report.stages.every((s: any) =>
+        s.name === stageName ? validated.data.status === "approved" : s.status === "approved"
+      );
+      const currentStageObj = report.stages.find((s: any) => s.name === stageName);
       const stageIdx = currentStageObj ? currentStageObj.orderIndex : 0;
 
       if (allApproved) {
+        reportStatus = "approved";
         await reportRepository.updateReportStatus({
           reportId,
           status: "approved",
           currentStageIndex: 6,
         });
       } else if (validated.data.status === "approved") {
+        reportStatus = "in_review";
         await reportRepository.updateReportStatus({
           reportId,
           status: "in_review",
@@ -68,12 +97,21 @@ export async function PATCH(
     }
 
     const updated = await reportRepository.getReport(reportId);
-    const updatedStage = updated?.stages?.find((s) => s.name === stageName);
+    const updatedStage = updated?.stages?.find((s) => s.name === stageName) || {
+      id: `stage-${stageName}`,
+      reportId,
+      name: stageName,
+      orderIndex: STAGE_NAMES.indexOf(stageName),
+      status: validated.data.status || "approved",
+      output: validated.data.output,
+      sources: validated.data.sources || null,
+      updatedAt: new Date().toISOString(),
+    };
 
     return NextResponse.json({
       success: true,
       stage: updatedStage,
-      reportStatus: updated?.status,
+      reportStatus,
     });
   } catch (error: any) {
     console.error("[API] PATCH /api/reports/[id]/stages/[stage] error:", error);
@@ -83,4 +121,3 @@ export async function PATCH(
     );
   }
 }
-

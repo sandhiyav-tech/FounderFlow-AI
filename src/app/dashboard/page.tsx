@@ -29,16 +29,40 @@ export default function DashboardPage() {
   const [statusFilter, setStatusFilter] = useState<string>("all");
 
   const fetchReports = async () => {
+    let localReports: ReportRecord[] = [];
+    try {
+      const indexList: string[] = JSON.parse(localStorage.getItem("founderflow_reports_index") || "[]");
+      localReports = indexList
+        .map((id) => {
+          try {
+            const item = localStorage.getItem(`founderflow_report_${id}`);
+            return item ? JSON.parse(item) : null;
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean);
+    } catch {
+      // ignore
+    }
+
     try {
       const res = await fetch("/api/reports");
       const data = await res.json();
-      if (data.success) {
-        setReports(data.reports || []);
+      if (data.success && data.reports) {
+        const map = new Map<string, ReportRecord>();
+        localReports.forEach((r) => map.set(r.id, r));
+        data.reports.forEach((r: ReportRecord) => map.set(r.id, r));
+        setReports(Array.from(map.values()).sort((a, b) => (b.updatedAt > a.updatedAt ? 1 : -1)));
       } else {
-        throw new Error(data.error || "Failed to load reports");
+        setReports(localReports);
       }
     } catch (err: any) {
-      setError(err.message || "Failed to load reports.");
+      if (localReports.length > 0) {
+        setReports(localReports);
+      } else {
+        setError(err.message || "Failed to load reports.");
+      }
     } finally {
       setLoading(false);
     }
@@ -54,14 +78,19 @@ export default function DashboardPage() {
     if (!confirm("Are you sure you want to delete this research brief?")) return;
 
     try {
+      localStorage.removeItem(`founderflow_report_${id}`);
+      const indexList: string[] = JSON.parse(localStorage.getItem("founderflow_reports_index") || "[]");
+      localStorage.setItem("founderflow_reports_index", JSON.stringify(indexList.filter((i) => i !== id)));
+    } catch {
+      // ignore
+    }
+
+    try {
       const res = await fetch(`/api/reports/${id}`, { method: "DELETE" });
-      if (res.ok) {
-        setReports((prev) => prev.filter((r) => r.id !== id));
-      } else {
-        alert("Failed to delete report.");
-      }
+      setReports((prev) => prev.filter((r) => r.id !== id));
     } catch (err) {
       console.error("Delete error:", err);
+      setReports((prev) => prev.filter((r) => r.id !== id));
     }
   };
 

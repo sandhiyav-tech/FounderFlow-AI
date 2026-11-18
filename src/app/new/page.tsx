@@ -66,6 +66,15 @@ export default function NewReportPage() {
         throw new Error(data.error || "Failed to initialize research report.");
       }
 
+      // Persist to localStorage for serverless resilience
+      try {
+        localStorage.setItem(`founderflow_report_${data.report.id}`, JSON.stringify(data.report));
+        const indexList = JSON.parse(localStorage.getItem("founderflow_reports_index") || "[]");
+        localStorage.setItem("founderflow_reports_index", JSON.stringify([data.report.id, ...indexList.filter((id: string) => id !== data.report.id)]));
+      } catch {
+        // ignore
+      }
+
       router.push(`/report/${data.report.id}`);
     } catch (err: any) {
       setError(err.message || "An unexpected error occurred.");
